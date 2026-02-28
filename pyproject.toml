@@ -1,0 +1,11 @@
+[project]
+name = "tpu-research"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jax>=0.9.0.1",
+    "jaxlib>=0.9.0.1",
+    "libtpu==0.0.30",
+]

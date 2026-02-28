@@ -1,0 +1,50 @@
+Traceback (most recent call last):
+  File "/home/gcpuser/tpu-research/pallas_call-shape-limit.py", line 108, in test_1d_block_alignment
+    z = jax.jit(pallas_add_1d, static_argnames=['block_size'])(x, y, block_size)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/traceback_util.py", line 195, in reraise_with_filtered_traceback
+    return fun(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/pjit.py", line 259, in cache_miss
+    executable, pgle_profiler, const_args) = _run_python_pjit(
+                                             ^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/pjit.py", line 142, in _run_python_pjit
+    out_flat, compiled, profiler, const_args = _pjit_call_impl_python(
+                                               ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/pjit.py", line 1202, in _pjit_call_impl_python
+    compiled = computation.compile()
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/interpreters/pxla.py", line 2510, in compile
+    executable = UnloadedMeshExecutable.from_hlo(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/interpreters/pxla.py", line 3056, in from_hlo
+    xla_executable = _cached_compilation(
+                     ^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/interpreters/pxla.py", line 2837, in _cached_compilation
+    xla_executable = compiler.compile_or_get_cached(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/compiler.py", line 478, in compile_or_get_cached
+    return _compile_and_write_cache(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/compiler.py", line 746, in _compile_and_write_cache
+    executable = backend_compile_and_load(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/profiler.py", line 359, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/compiler.py", line 372, in backend_compile_and_load
+    raise e
+  File "/home/gcpuser/tpu-research/.venv/lib/python3.11/site-packages/jax/_src/compiler.py", line 362, in backend_compile_and_load
+    return backend.compile_and_load(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: INVALID_ARGUMENT: Mosaic failed to compile TPU kernel: Failed to verify layout for Mosaic kernel operand 1: XLA layout ({0:T(1024)}) does not match Mosaic layout ({0:T(512)}) for an operand of shape f32[1024]. Try changing your kernel block shape to (1024) to align with the XLA layout.
+Hello from tpu-research!
+jax version: 0.9.0.1
+
+==================================================
+Testing 1D Block Alignment (f32 requires 128 multiple or equal to array size)
+==================================================
+
+--- Testing 1D Add (Size=1024, Block Size=512) ---
+pallas_call 1D block shape = (512,)
+Failed! Error:
