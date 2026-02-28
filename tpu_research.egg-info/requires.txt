@@ -1,9 +1,0 @@
-
-[jax-cpu]
-jax[cpu]>=0.4.0
-
-[jax-tpu]
-jax[tpu]>=0.4.0
-
-[test]
-pytest>=7.0
