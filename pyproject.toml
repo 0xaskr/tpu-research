@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tpu-research"
+version = "0.1.0"
+description = "Reference library for TPU hardware characteristics and JAX feature support"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+keywords = ["TPU", "JAX", "machine learning", "hardware"]
+
+[project.optional-dependencies]
+jax-cpu = ["jax[cpu]>=0.4.0"]
+jax-tpu = ["jax[tpu]>=0.4.0"]
+test = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

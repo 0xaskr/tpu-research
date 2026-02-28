@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: tpu-research
+Version: 0.1.0
+Summary: Reference library for TPU hardware characteristics and JAX feature support
+License: Apache-2.0
+Keywords: TPU,JAX,machine learning,hardware
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Provides-Extra: jax-cpu
+Requires-Dist: jax[cpu]>=0.4.0; extra == "jax-cpu"
+Provides-Extra: jax-tpu
+Requires-Dist: jax[tpu]>=0.4.0; extra == "jax-tpu"
+Provides-Extra: test
+Requires-Dist: pytest>=7.0; extra == "test"
+
 # tpu-research
 
 A research reference covering Google TPU hardware characteristics and JAX feature support.
