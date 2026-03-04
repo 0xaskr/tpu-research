@@ -38,9 +38,10 @@ def chunk_gla(
         final_state: [N, H, K, V] 或 None
     """
     dtype = q.dtype
+    # transpose: [B, T, H, K/V] → [B, H, T, K/V], float32 计算
     q, k, v, g = (x.transpose(1, 2).float() for x in (q, k, v, g))
-    B, H, T, K = q.shape
-    V = v.shape[-1]
+    B, H, T, K = q.shape   # q: [B, H, T, K]
+    V = v.shape[-1]         # v: [B, H, T, V]
 
     if scale is None:
         scale = K ** -0.5
@@ -66,12 +67,12 @@ def chunk_gla(
             if output_final_state:
                 final_states.append(h_seg.squeeze(0))  # [H, K, V]
 
-        final_state = torch.stack(final_states, dim=0) if output_final_state else None
-        return o.transpose(1, 2).to(dtype), final_state
+        final_state = torch.stack(final_states, dim=0) if output_final_state else None  # [N, H, K, V]
+        return o.transpose(1, 2).to(dtype), final_state  # o: [B, T, H, V]
     else:
         o, h_final = _chunk_gla_inner(q, k, v, g, scale, initial_state, chunk_size)
-        final_state = h_final if output_final_state else None
-        return o.transpose(1, 2).to(dtype), final_state
+        final_state = h_final if output_final_state else None  # [B, H, K, V] 或 None
+        return o.transpose(1, 2).to(dtype), final_state  # o: [B, T, H, V]
 
 
 # =============================================================================
@@ -124,9 +125,9 @@ def _chunk_gla_inner(
     g_cumsum = g.cumsum(dim=3)  # [B, H, NT, C, K]
 
     # 初始化隐状态
-    h = q.new_zeros(B, H, K, V, dtype=torch.float32)
+    h = q.new_zeros(B, H, K, V, dtype=torch.float32)  # [B, H, K, V]
     if initial_state is not None:
-        h = h + initial_state.float()
+        h = h + initial_state.float()                  # [B, H, K, V]
 
     # 因果掩码 [C, C]
     causal_mask = torch.tril(
@@ -144,24 +145,24 @@ def _chunk_gla_inner(
         k_gated = k_c * (-gc).exp()   # [B, H, C, K]
 
         # 块间贡献: o_inter = scale * q_gated @ h
-        o_inter = scale * torch.einsum('bhck,bhkv->bhcv', q_gated, h)
+        o_inter = scale * torch.einsum('bhck,bhkv->bhcv', q_gated, h)  # [B, H, C, V]
 
         # 块内注意力: A = q_gated @ k_gated^T, 因果掩码后乘 V
-        A = torch.einsum('bhik,bhjk->bhij', q_gated, k_gated)
+        A = torch.einsum('bhik,bhjk->bhij', q_gated, k_gated)  # [B, H, C, C]
         A = A.masked_fill(~causal_mask, 0.0)
-        o_intra = scale * torch.einsum('bhij,bhjv->bhiv', A, v_c)
+        o_intra = scale * torch.einsum('bhij,bhjv->bhiv', A, v_c)  # [B, H, C, V]
 
-        outputs.append(o_inter + o_intra)
+        outputs.append(o_inter + o_intra)  # [B, H, C, V]
 
         # 状态更新: h = h * exp(G_total) + Σ k_j·exp(G_total-G_j) ⊗ v_j
         g_total = gc[:, :, -1, :]  # [B, H, K]
-        h = h * g_total.unsqueeze(-1).exp()
-        k_state = k_c * (g_total.unsqueeze(2) - gc).exp()  # [B, H, C, K]
-        h = h + torch.einsum('bhck,bhcv->bhkv', k_state, v_c)
+        h = h * g_total.unsqueeze(-1).exp()                     # [B, H, K, V]
+        k_state = k_c * (g_total.unsqueeze(2) - gc).exp()       # [B, H, C, K]
+        h = h + torch.einsum('bhck,bhcv->bhkv', k_state, v_c)   # [B, H, K, V]
 
     # 合并输出, 裁剪 padding
-    o = torch.stack(outputs, dim=2).reshape(B, H, T_padded, V)[:, :, :T, :]
-    return o, h
+    o = torch.stack(outputs, dim=2).reshape(B, H, T_padded, V)[:, :, :T, :]  # [B, H, T, V]
+    return o, h  # o: [B, H, T, V], h: [B, H, K, V]
 
 
 
@@ -233,10 +234,10 @@ def naive_recurrent_gla(
         final_state: [N, H, K, V] 或 None
     """
     dtype = q.dtype
-    # 转为 [B, H, T, K/V] 并使用 float32 计算
+    # transpose: [B, T, H, K/V] → [B, H, T, K/V], float32 计算
     q, k, v, gk = (x.transpose(1, 2).float() for x in (q, k, v, gk))
-    B, H, T_total, K = q.shape
-    V = v.shape[-1]
+    B, H, T_total, K = q.shape    # q: [B, H, T, K]
+    V = v.shape[-1]               # v: [B, H, T, V]
 
     if scale is None:
         scale = K ** -0.5
@@ -254,45 +255,45 @@ def naive_recurrent_gla(
             seg_len = eos - bos
 
             # 提取本段数据 [1, H, seg_len, K/V]
-            q_seg = q[:, :, bos:eos, :]
-            k_seg = k[:, :, bos:eos, :]
-            v_seg = v[:, :, bos:eos, :]
-            gk_seg = gk[:, :, bos:eos, :]
+            q_seg = q[:, :, bos:eos, :]     # [1, H, seg_len, K]
+            k_seg = k[:, :, bos:eos, :]     # [1, H, seg_len, K]
+            v_seg = v[:, :, bos:eos, :]     # [1, H, seg_len, V]
+            gk_seg = gk[:, :, bos:eos, :]   # [1, H, seg_len, K]
 
             # 初始状态
-            h = q.new_zeros(1, H, K, V, dtype=torch.float32)
+            h = q.new_zeros(1, H, K, V, dtype=torch.float32)  # [1, H, K, V]
             if initial_state is not None:
-                h = h + initial_state[i:i+1].float()
+                h = h + initial_state[i:i+1].float()           # [1, H, K, V]
 
             for t in range(seg_len):
-                q_t = q_seg[:, :, t] * scale
-                k_t = k_seg[:, :, t]
-                v_t = v_seg[:, :, t]
-                gk_t = gk_seg[:, :, t].exp()
+                q_t = q_seg[:, :, t] * scale   # [1, H, K]
+                k_t = k_seg[:, :, t]           # [1, H, K]
+                v_t = v_seg[:, :, t]           # [1, H, V]
+                gk_t = gk_seg[:, :, t].exp()   # [1, H, K]
                 kv_t = k_t[..., None] * v_t[..., None, :]  # [1, H, K, V]
-                h = h * gk_t[..., None] + kv_t
-                o[:, :, bos + t] = (q_t[..., None] * h).sum(-2)
+                h = h * gk_t[..., None] + kv_t             # [1, H, K, V]
+                o[:, :, bos + t] = (q_t[..., None] * h).sum(-2)  # [1, H, V]
 
             if output_final_state:
                 final_states.append(h.squeeze(0))  # [H, K, V]
 
         final_state = torch.stack(final_states, dim=0) if output_final_state else None  # [N, H, K, V]
-        return o.transpose(1, 2).to(dtype), final_state
+        return o.transpose(1, 2).to(dtype), final_state  # o: [B, T, H, V]
     else:
         # 标准 batch 模式
         o = torch.zeros_like(v)  # [B, H, T, V]
-        h = q.new_zeros(B, H, K, V, dtype=torch.float32)
+        h = q.new_zeros(B, H, K, V, dtype=torch.float32)  # [B, H, K, V]
         if initial_state is not None:
-            h = h + initial_state.float()
+            h = h + initial_state.float()                  # [B, H, K, V]
 
         for t in range(T_total):
-            q_t = q[:, :, t] * scale
-            k_t = k[:, :, t]
-            v_t = v[:, :, t]
-            gk_t = gk[:, :, t].exp()
+            q_t = q[:, :, t] * scale     # [B, H, K]
+            k_t = k[:, :, t]             # [B, H, K]
+            v_t = v[:, :, t]             # [B, H, V]
+            gk_t = gk[:, :, t].exp()     # [B, H, K]
             kv_t = k_t[..., None] * v_t[..., None, :]  # [B, H, K, V]
-            h = h * gk_t[..., None] + kv_t
-            o[:, :, t] = (q_t[..., None] * h).sum(-2)
+            h = h * gk_t[..., None] + kv_t              # [B, H, K, V]
+            o[:, :, t] = (q_t[..., None] * h).sum(-2)   # [B, H, V]
 
-        final_state = h if output_final_state else None
-        return o.transpose(1, 2).to(dtype), final_state
+        final_state = h if output_final_state else None   # [B, H, K, V] 或 None
+        return o.transpose(1, 2).to(dtype), final_state   # o: [B, T, H, V]

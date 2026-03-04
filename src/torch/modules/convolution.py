@@ -45,7 +45,9 @@ class ShortConvolution(nn.Conv1d):
         x: torch.Tensor,
         cu_seqlens: torch.LongTensor | None = None,
     ) -> torch.Tensor:
-        """Apply causal conv1d. x shape: [B, T, D] -> [B, T, D]."""
+        """Apply causal conv1d.
+        x: [B, T, D] -> [B, T, D]  (depthwise causal convolution + optional SiLU)
+        """
         W = self.kernel_size[0]
 
         if cu_seqlens is not None:
@@ -129,6 +131,10 @@ class ShortConvolution(nn.Conv1d):
         cu_seqlens: torch.LongTensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # x: [B, T, D]  — 投影后的 q/k/v (D = key_dim 或 value_dim_per_group 等)
+        # cache: [N, D, W] 或 None (W = kernel_size)
+        # cu_seqlens: [N+1] 或 None
+        # -> y: [B, T, D], final_state: [N, D, W] 或 None
         B, T, D = x.shape
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
         W = self.kernel_size[0]

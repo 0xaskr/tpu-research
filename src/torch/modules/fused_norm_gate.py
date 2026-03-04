@@ -29,13 +29,16 @@ class FusedRMSNormGated(nn.Module):
             self.register_parameter('weight', None)
 
     def forward(self, x: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+        # x: [B, T, H, V]  — kernel 输出 (需要归一化)
+        # g: [B, T, H, V]  — gate 值 (从 g_proj 投影 + rearrange 得到)
+        # -> [B, T, H, V]  = RMSNorm(x) * SiLU(g)
         input_dtype = x.dtype
         x = x.float()
         g = g.float()
-        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        x = x * rms
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)  # [B, T, H, 1]
+        x = x * rms                     # [B, T, H, V]
         if self.weight is not None:
-            x = x * self.weight.float()
-        x = x * F.silu(g)
+            x = x * self.weight.float()  # [B, T, H, V]  element-wise
+        x = x * F.silu(g)               # [B, T, H, V]
         return x.to(input_dtype)
 

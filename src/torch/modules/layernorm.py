@@ -28,10 +28,12 @@ class RMSNorm(nn.Module):
             self.register_parameter('weight', None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [*, H, V]  (通常 [B, T, H, head_v_dim])
+        # -> [*, H, V]  (归一化后)
         input_dtype = x.dtype
         x = x.float()
-        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        x = x * rms
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)  # [*, H, 1]
+        x = x * rms                    # [*, H, V]
         if self.weight is not None:
-            x = x * self.weight.float()
+            x = x * self.weight.float() # [*, H, V]  element-wise
         return x.to(input_dtype)

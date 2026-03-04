@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "transformers",
     "einops",
+    "flash-linear-attention",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,9 @@ gpu = [
 
 [tool.uv]
 find-links = ["https://storage.googleapis.com/jax-releases/libtpu_releases.html"]
+
+[tool.uv.sources]
+flash-linear-attention = { git = "https://github.com/fla-org/flash-linear-attention" }
 
 [tool.ruff]
 # 设置每行最大长度（可选）

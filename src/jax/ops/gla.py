@@ -149,9 +149,3 @@ def _naive_recurrent_gla_varlen(
     o = jnp.concatenate(o_segments, axis=1)  # [1, T_total, H, V]
     final_state = jnp.stack(final_states, axis=0) if output_final_state else None
     return o, final_state
-
-
-# =============================================================================
-# Reshape / repeat utilities (替代 einops 在 JAX 侧的功能)
-# =============================================================================
-

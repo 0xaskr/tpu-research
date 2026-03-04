@@ -10,10 +10,11 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 os.environ.setdefault('JAX_PLATFORMS', 'cpu')
 
@@ -994,7 +995,7 @@ def run_test_attention_mask_pipeline() -> bool:
 
     Tests: get_unpad_data, index_first_axis, pad_input pipeline.
     """
-    from torch_src.utils import (
+    from src.torch.layers.utils import (
         get_unpad_data, index_first_axis, pad_input,
     )
 

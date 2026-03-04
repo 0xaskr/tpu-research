@@ -24,6 +24,15 @@ from src.jax.modules.fused_norm_gate import FusedRMSNormGated
 from src.jax.modules.convolution import ShortConvolution
 from src.jax.ops.gla import naive_recurrent_gla
 
+ACT2FN = {
+    'swish': jax.nn.swish,
+    'silu': jax.nn.swish,
+    'gelu': jax.nn.gelu,
+    'relu': jax.nn.relu,
+    'sigmoid': jax.nn.sigmoid,
+    'tanh': jax.nn.tanh,
+}
+
 def _rearrange_to_heads(x: jnp.ndarray, head_dim: int) -> jnp.ndarray:
     """Reshape: ... (h d) -> ... h d"""
     *leading, last = x.shape
