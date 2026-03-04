@@ -1,0 +1,298 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange, repeat
+
+def chunk_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Chunked GLA — 纯 PyTorch CPU 实现.
+
+    将序列分为大小为 chunk_size 的块并行计算, 块间通过隐状态传播.
+    与 naive_recurrent_gla 数学等价, 但利用块内并行性.
+
+    注意: 门控参数名为 ``g`` (与 FLA chunk_gla API 一致),
+    而非 fused_recurrent_gla 的 ``gk``.
+
+    Args:
+        q: [B, T, H, K]
+        k: [B, T, H, K]
+        v: [B, T, H, V]
+        g: [B, T, H, K] — 门控 (log-space, logsigmoid 之后)
+        scale: 缩放因子, 默认 K^{-0.5}
+        initial_state: [N, H, K, V]
+        output_final_state: 是否输出最终状态
+        cu_seqlens: [N+1] 变长序列累积长度
+        chunk_size: 块大小, 默认 16
+
+    Returns:
+        o: [B, T, H, V]
+        final_state: [N, H, K, V] 或 None
+    """
+    dtype = q.dtype
+    q, k, v, g = (x.transpose(1, 2).float() for x in (q, k, v, g))
+    B, H, T, K = q.shape
+    V = v.shape[-1]
+
+    if scale is None:
+        scale = K ** -0.5
+
+    if cu_seqlens is not None:
+        # 变长序列: 按 cu_seqlens 分段, 每段独立做 chunk
+        assert B == 1, "cu_seqlens requires B=1"
+        N = len(cu_seqlens) - 1
+        o = torch.zeros_like(v)  # [1, H, T_total, V]
+        final_states = [] if output_final_state else None
+
+        for i in range(N):
+            bos = cu_seqlens[i].item()
+            eos = cu_seqlens[i + 1].item()
+            h0 = initial_state[i:i + 1] if initial_state is not None else None
+
+            o_seg, h_seg = _chunk_gla_inner(
+                q[:, :, bos:eos], k[:, :, bos:eos],
+                v[:, :, bos:eos], g[:, :, bos:eos],
+                scale, h0, chunk_size,
+            )
+            o[:, :, bos:eos] = o_seg
+            if output_final_state:
+                final_states.append(h_seg.squeeze(0))  # [H, K, V]
+
+        final_state = torch.stack(final_states, dim=0) if output_final_state else None
+        return o.transpose(1, 2).to(dtype), final_state
+    else:
+        o, h_final = _chunk_gla_inner(q, k, v, g, scale, initial_state, chunk_size)
+        final_state = h_final if output_final_state else None
+        return o.transpose(1, 2).to(dtype), final_state
+
+
+# =============================================================================
+# chunk_gla: 分块 GLA (纯 PyTorch, 与 naive_recurrent_gla 数学等价)
+# =============================================================================
+
+def _chunk_gla_inner(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor | None,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """分块 GLA 内部实现. 输入已 transpose 为 [B, H, T, K/V] float32.
+
+    将序列分为大小为 chunk_size 的块, 每块内部用并行注意力计算,
+    块间用隐状态传播. 与逐步递归数学等价.
+
+    算法:
+        对于块 c (包含 C 个 token):
+        G_c[t] = cumsum(g_chunk, dim=t)  (块内累积门控)
+        inter-chunk: o_inter = scale * (q * exp(G)) @ h
+        intra-chunk: A = (q * exp(G)) @ (k * exp(-G))^T  (因果掩码)
+                     o_intra = scale * A @ v
+        state update: h = h * exp(G_total) + sum_j k_j*exp(G_total-G_j) ⊗ v_j
+    """
+    B, H, T, K = q.shape
+    V = v.shape[-1]
+    C = chunk_size
+    NT = (T + C - 1) // C
+    T_padded = NT * C
+
+    # 补齐到 chunk_size 的整数倍
+    if T_padded > T:
+        pad = T_padded - T
+        q = F.pad(q, (0, 0, 0, pad))
+        k = F.pad(k, (0, 0, 0, pad))
+        v = F.pad(v, (0, 0, 0, pad))
+        g = F.pad(g, (0, 0, 0, pad))
+
+    # 重塑为 [B, H, NT, C, K/V]
+    q = q.view(B, H, NT, C, K)
+    k = k.view(B, H, NT, C, K)
+    v = v.view(B, H, NT, C, V)
+    g = g.view(B, H, NT, C, K)
+
+    # 块内累积门控
+    g_cumsum = g.cumsum(dim=3)  # [B, H, NT, C, K]
+
+    # 初始化隐状态
+    h = q.new_zeros(B, H, K, V, dtype=torch.float32)
+    if initial_state is not None:
+        h = h + initial_state.float()
+
+    # 因果掩码 [C, C]
+    causal_mask = torch.tril(
+        torch.ones(C, C, device=q.device, dtype=torch.bool))
+
+    outputs = []
+    for c_idx in range(NT):
+        q_c = q[:, :, c_idx]       # [B, H, C, K]
+        k_c = k[:, :, c_idx]       # [B, H, C, K]
+        v_c = v[:, :, c_idx]       # [B, H, C, V]
+        gc = g_cumsum[:, :, c_idx]  # [B, H, C, K]
+
+        # 门控 Q/K
+        q_gated = q_c * gc.exp()      # [B, H, C, K]
+        k_gated = k_c * (-gc).exp()   # [B, H, C, K]
+
+        # 块间贡献: o_inter = scale * q_gated @ h
+        o_inter = scale * torch.einsum('bhck,bhkv->bhcv', q_gated, h)
+
+        # 块内注意力: A = q_gated @ k_gated^T, 因果掩码后乘 V
+        A = torch.einsum('bhik,bhjk->bhij', q_gated, k_gated)
+        A = A.masked_fill(~causal_mask, 0.0)
+        o_intra = scale * torch.einsum('bhij,bhjv->bhiv', A, v_c)
+
+        outputs.append(o_inter + o_intra)
+
+        # 状态更新: h = h * exp(G_total) + Σ k_j·exp(G_total-G_j) ⊗ v_j
+        g_total = gc[:, :, -1, :]  # [B, H, K]
+        h = h * g_total.unsqueeze(-1).exp()
+        k_state = k_c * (g_total.unsqueeze(2) - gc).exp()  # [B, H, C, K]
+        h = h + torch.einsum('bhck,bhcv->bhkv', k_state, v_c)
+
+    # 合并输出, 裁剪 padding
+    o = torch.stack(outputs, dim=2).reshape(B, H, T_padded, V)[:, :, :T, :]
+    return o, h
+
+
+
+# =============================================================================
+# fused_chunk_gla: 融合分块 GLA (委托给 chunk_gla)
+# =============================================================================
+
+def fused_chunk_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Fused chunk GLA — 纯 PyTorch CPU 实现.
+
+    与 chunk_gla 相同算法 (在 CPU 上融合/非融合无区别).
+    原始 FLA 中此函数已废弃, 建议使用 chunk_gla.
+
+    参数同 chunk_gla (参见 chunk_gla 文档).
+    """
+    return chunk_gla(
+        q=q, k=k, v=v, g=g,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+    )
+
+# =============================================================================
+# GLA core operation: naive recurrent (替代 Triton 版 chunk_gla / fused_recurrent_gla)
+# 核心 GLA 递归操作，纯 PyTorch 实现
+# =============================================================================
+
+def naive_recurrent_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    gk: torch.Tensor,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Naive recurrent GLA — 纯 PyTorch CPU 实现.
+
+    数学等价于 chunk_gla / fused_recurrent_gla / fused_chunk_gla,
+    但使用朴素逐步递归代替 Triton 分块或融合内核。
+
+    核心递归:
+        h_t = h_{t-1} * exp(gk_t) + k_t^T v_t
+        o_t = q_t * h_t  (然后沿 K 维度求和)
+
+    Args:
+        q: [B, T, H, K] — 查询
+        k: [B, T, H, K] — 键
+        v: [B, T, H, V] — 值
+        gk: [B, T, H, K] — 门控 (log-space, 即 logsigmoid 之后的值)
+        scale: 缩放因子, 默认 K^{-0.5}
+        initial_state: [N, H, K, V] — 初始状态
+        output_final_state: 是否输出最终状态
+        cu_seqlens: [N+1] — 变长序列累积长度 (此时 B 必须为 1)
+
+    Returns:
+        o: [B, T, H, V] — 输出
+        final_state: [N, H, K, V] 或 None
+    """
+    dtype = q.dtype
+    # 转为 [B, H, T, K/V] 并使用 float32 计算
+    q, k, v, gk = (x.transpose(1, 2).float() for x in (q, k, v, gk))
+    B, H, T_total, K = q.shape
+    V = v.shape[-1]
+
+    if scale is None:
+        scale = K ** -0.5
+
+    if cu_seqlens is not None:
+        # 变长序列模式: B=1, 按 cu_seqlens 分段独立递归
+        assert B == 1, "cu_seqlens requires B=1"
+        N = len(cu_seqlens) - 1
+        o = torch.zeros_like(v)  # [1, H, T_total, V]
+        final_states = [] if output_final_state else None
+
+        for i in range(N):
+            bos = cu_seqlens[i].item()
+            eos = cu_seqlens[i + 1].item()
+            seg_len = eos - bos
+
+            # 提取本段数据 [1, H, seg_len, K/V]
+            q_seg = q[:, :, bos:eos, :]
+            k_seg = k[:, :, bos:eos, :]
+            v_seg = v[:, :, bos:eos, :]
+            gk_seg = gk[:, :, bos:eos, :]
+
+            # 初始状态
+            h = q.new_zeros(1, H, K, V, dtype=torch.float32)
+            if initial_state is not None:
+                h = h + initial_state[i:i+1].float()
+
+            for t in range(seg_len):
+                q_t = q_seg[:, :, t] * scale
+                k_t = k_seg[:, :, t]
+                v_t = v_seg[:, :, t]
+                gk_t = gk_seg[:, :, t].exp()
+                kv_t = k_t[..., None] * v_t[..., None, :]  # [1, H, K, V]
+                h = h * gk_t[..., None] + kv_t
+                o[:, :, bos + t] = (q_t[..., None] * h).sum(-2)
+
+            if output_final_state:
+                final_states.append(h.squeeze(0))  # [H, K, V]
+
+        final_state = torch.stack(final_states, dim=0) if output_final_state else None  # [N, H, K, V]
+        return o.transpose(1, 2).to(dtype), final_state
+    else:
+        # 标准 batch 模式
+        o = torch.zeros_like(v)  # [B, H, T, V]
+        h = q.new_zeros(B, H, K, V, dtype=torch.float32)
+        if initial_state is not None:
+            h = h + initial_state.float()
+
+        for t in range(T_total):
+            q_t = q[:, :, t] * scale
+            k_t = k[:, :, t]
+            v_t = v[:, :, t]
+            gk_t = gk[:, :, t].exp()
+            kv_t = k_t[..., None] * v_t[..., None, :]  # [B, H, K, V]
+            h = h * gk_t[..., None] + kv_t
+            o[:, :, t] = (q_t[..., None] * h).sum(-2)
+
+        final_state = h if output_final_state else None
+        return o.transpose(1, 2).to(dtype), final_state
