@@ -29,11 +29,13 @@ def run_tpu_test(B:int, T:int, H:int, V:int, K:int,
   assert TPU_AVAILABLE, "TPU not available, cannot run TPU test"
 
   status = True
-  q_cpu = np.random.random([B, T, H, K]).astype(dtype)
-  k_cpu = np.random.random([B, T, H, K]).astype(dtype)
-  v_cpu = np.random.random([B, T, H, V]).astype(dtype)
-  gk_cpu = np.random.random([B, T, H, K]).astype(dtype) if use_gk else None
-  gv_cpu = np.random.random([B, T, H, V]).astype(dtype) if use_gv else None
+  q_cpu = np.random.randn(B, T, H, K).astype(dtype)
+  k_cpu = np.random.randn(B, T, H, K).astype(dtype)
+  v_cpu = np.random.randn(B, T, H, V).astype(dtype)
+  # Ensure strict decay for stability: gk should be negative (log-space decay)
+  # Using log-sigmoid-ish distribution or just negative values
+  gk_cpu = -np.abs(np.random.randn(B, T, H, K)).astype(dtype) if use_gk else None
+  gv_cpu = np.random.randn(B, T, H, V).astype(dtype) if use_gv else None
   scale = scale if scale is not None else K ** -0.5
 
   N = cu_seqlens.shape[-1] - 1 if cu_seqlens is not None else B
@@ -93,7 +95,8 @@ def tpu_test():
   all_passed = True
   test_cases = [
     dict(name="Test Case 1: Basic functionality with all features enabled",
-         B=2, T=4, H=2, V=8, K=8, use_gk=True, use_gv=False, scale=None, use_init_state=True, use_final_state=True, reverse=False, cu_seqlens=None, dtype=np.float32),
+         B=2, T=1024, H=2, V=128, K=128, use_gk=True, use_gv=False, scale=None,
+         use_init_state=True, use_final_state=True, reverse=False, cu_seqlens=None, dtype=np.float32),
   ]
 
 

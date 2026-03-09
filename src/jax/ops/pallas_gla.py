@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from src.utils import next_power_of_2, cdiv
+from src.utils import next_power_of_2, cdiv, align_up, pad_to_multiple
 
 __all__ = ['fused_recurrent_gla_fwd']
 
@@ -34,10 +34,6 @@ def fused_recurrent_gla_fwd(
   assert scale is not None, "ignore pylance warning about unused variable `scale`, which is actually used in the kernel call"
   assert reverse == False, "Reverse mode is not yet implemented in the JAX version"
   # TODO(0xaskr) support it.
-  assert K % 8 == 0, f"K must be a multiple of 8 for the current implementation, got {K}"
-  # TODO(0xaskr): support non-multiple of 8 K in the JAX version, which would require padding the input and output.
-  assert V % 8 == 0, f"V must be a multiple of 8 for the current implementation, got {V}"
-  # TODO(0xaskr): support non-multiple of 8 V in the JAX version, which would require padding the input and output.
 
   if cu_seqlens is not None:
     o, ht = _fused_recurrent_gla_fwd_varlen(
@@ -70,7 +66,7 @@ def fused_recurrent_gla_fwd(
     )
   return o, ht
 
-@jax.jit(static_argnames=["use_gk", "use_gv", "use_init_state", "use_final_state"])
+# @jax.jit(static_argnames=["use_gk", "use_gv", "use_init_state", "use_final_state", "output_final_state"])
 def _fused_recurrent_gla_fwd(
     q: jax.Array,
     k: jax.Array,
@@ -87,43 +83,48 @@ def _fused_recurrent_gla_fwd(
     use_final_state: bool = False):
   B, T ,H, K, V = *q.shape, v.shape[-1]
   N = B
-  BK, BV = min(next_power_of_2(K), 64), min(next_power_of_2(V), 64)
-  # BK, BV = 128, 128
+  # BK, BV = min(next_power_of_2(K), 64), min(next_power_of_2(V), 64)
+  BK, BV = 128, 128
   NK, NV = cdiv(K, BK), cdiv(V, BV)
+  origin_K = K
+  origin_V = V
+  K = align_up(K, BK)
+  V = align_up(V, BV)
+
   h0 = initial_state
   ht = jnp.zeros((N, H, K, V), dtype=jnp.float32) if use_final_state else None
-  o = jnp.zeros([NK, B, H, V, T], dtype=jnp.float32)
+  o = jnp.zeros([NK, B, H, T, V], dtype=jnp.float32)  # [NK, B, T, H, V] -> [NK, B, H, T, V]
   o_spec = jax.ShapeDtypeStruct(o.shape, o.dtype)
   ht_spec = jax.ShapeDtypeStruct(ht.shape, ht.dtype) if ht is not None else None
 
-  # [B, T, H, K] -> [B, H, K, T]
-  q_trans = q.transpose(0, 2, 3, 1)
-  k_trans = k.transpose(0, 2, 3, 1)
-  v_trans = v.transpose(0, 2, 3, 1)
-  gk_trans = gk.transpose(0, 2, 3, 1) if use_gk else None
-  gv_trans = gv.transpose(0, 2, 3, 1) if use_gv else None
-  h0_trans = h0 if use_init_state else None
+  # [B, T, H, K] -> [B, H, T, K]
+  q_trans = pad_to_multiple(q, BK, 3, 0).transpose(0, 2, 1, 3)
+  k_trans = pad_to_multiple(k, BK, 3, 0).transpose(0, 2, 1, 3)
+  v_trans = pad_to_multiple(v, BV, 3, 0).transpose(0, 2, 1, 3)
+  gk_trans = pad_to_multiple(gk, BK, 3, 0).transpose(0, 2, 1, 3) if use_gk else None
+  gv_trans = pad_to_multiple(gv, BV, 3, 0).transpose(0, 2, 1, 3) if use_gv else None
+  h0_trans = pad_to_multiple(h0, BK, [2, 3], 0) if use_init_state else None
 
   def qk_index_map(idx_v, idx_k, idx_nh):
-    return (idx_nh // H, idx_nh % H, idx_k * BK, 0)
+    return (idx_nh // H, idx_nh % H, 0, idx_k)
 
   def v_index_map(idx_v, idx_k, idx_nh):
-    return (idx_nh // H, idx_nh % H, idx_v * BV, 0)
+    return (idx_nh // H, idx_nh % H, 0, idx_v)
 
   def h0_index_map(idx_v, idx_k, idx_nh):
-    return (idx_nh // H, idx_nh % H, idx_k * BK, idx_v * BV)
+    return (idx_nh // H, idx_nh % H, idx_k, idx_v)
 
   def o_index_map(idx_v, idx_k, idx_nh):
-    return (idx_k, idx_nh // H, idx_nh % H, idx_v * BV, 0)
+    return (idx_k, idx_nh // H, idx_nh % H, 0, idx_v)
 
-  q_blockspec = pl.BlockSpec([1, 1, BK, T], qk_index_map)
-  k_blockspec = pl.BlockSpec([1, 1, BK, T], qk_index_map)
-  v_blockspec = pl.BlockSpec([1, 1, BV, T], v_index_map)
-  gk_blockspec = pl.BlockSpec([1, 1, BK, T], qk_index_map) if use_gk else None
-  gv_blockspec = pl.BlockSpec([1, 1, BV, T], v_index_map) if use_gv else None
-  h0_blockspec = pl.BlockSpec([1, 1, K, V], h0_index_map) if use_init_state else None
+  q_blockspec = pl.BlockSpec([1, 1, T, BK], qk_index_map)
+  k_blockspec = pl.BlockSpec([1, 1, T, BK], qk_index_map)
+  v_blockspec = pl.BlockSpec([1, 1, T, BV], v_index_map)
+  gk_blockspec = pl.BlockSpec([1, 1, T, BK], qk_index_map) if use_gk else None
+  gv_blockspec = pl.BlockSpec([1, 1, T, BV], v_index_map) if use_gv else None
+  h0_blockspec = pl.BlockSpec([1, 1, BK, BV], h0_index_map) if use_init_state else None
 
-  o_blockspec = pl.BlockSpec([1, 1, 1, BV, T], o_index_map)
+  o_blockspec = pl.BlockSpec([1, 1, 1, T, BV], o_index_map)
   ht_blockspec = pl.BlockSpec([1, 1, BK, BV], h0_index_map) if use_final_state else None
   call_func = functools.partial(
     _fused_recurrent_gla_fwd_kernel,
@@ -137,6 +138,7 @@ def _fused_recurrent_gla_fwd(
     USE_G=False,
     USE_GK=gk is not None,
     USE_GV=gv is not None,
+    USE_INIT_STATE=initial_state is not None,
     OUTPUT_FINAL_STATE=output_final_state,
     REVERSE=reverse,
     SCALE=scale
@@ -154,7 +156,10 @@ def _fused_recurrent_gla_fwd(
     o, ht = results
   else:
     o, ht = results, None
+  o = o.transpose(0, 1, 3, 2, 4)  # [NK, B, H, T, V] -> [NK, B, T, H, V]
   o = o.sum(0)
+  o = o[:, :, :, :origin_V]  # [B, T, H, V]
+  ht = ht[:, :, :origin_K, :origin_V] if ht is not None else None
   return o, ht
 
 def _fused_recurrent_gla_fwd_kernel(
@@ -180,52 +185,49 @@ def _fused_recurrent_gla_fwd_kernel(
   USE_G: bool,
   USE_GK: bool,
   USE_GV: bool,
+  USE_INIT_STATE: bool,
   OUTPUT_FINAL_STATE: bool,
   REVERSE: bool,
 ):
-  print("q.shape = ", q.shape)
-  q = q.reshape(BK, T).transpose(1, 0)
-  k = k.reshape(BK, T).transpose(1, 0)
-  v = v.reshape(BV, T).transpose(1, 0)
-  # o = o.reshape(BV, T).transpose(1, 0)
+  assert K % BK == 0, f"K must be a multiple of BK={BK}, got {K}"
+  assert V % BV == 0, f"V must be a multiple of BV={BV}, got {V}"
+  q = q.reshape(T, BK)
+  k = k.reshape(T, BK)
+  v = v.reshape(T, BV)
+  # o = [1, 1, 1, T, BV]
+  # ht = [1, 1, BK, BV]
   if USE_GK:
-    gk = gk.reshape(BK, T).transpose(1, 0)
+    gk = gk.reshape(T, BK)
   if USE_GV:
-    gv = gv.reshape(BV, T).transpose(1, 0)
-  if h0 is not None:
-    h0 = h0.reshape(K, V).transpose(1, 0)
-  if ht is not None:
-    ht = ht.reshape(K, V).transpose(1, 0)
+    gv = gv.reshape(T, BV)
+  if USE_INIT_STATE:
+    h0 = h0.reshape(BK, BV)
 
-  idx_v, idx_k, idx_nh = pl.program_id(0), pl.program_id(1), pl.program_id(2)
-  idx_n, idx_h = idx_nh // H, idx_nh % H
-
-  ALL_T = B * T
-  bos, eos = idx_n * T, idx_n * T + T
-  o_k = idx_k * BK + jnp.arange(0, BK)
-  o_v = idx_v * BV + jnp.arange(0, BV)
-  m_k = o_k < K
-  m_v = o_v < V
-  m_h = m_k[:, None] & m_v[None, :]
   b_h = jnp.zeros((BK, BV), dtype=jnp.float32)
+  if USE_INIT_STATE:
+    b_h += h0[...].astype(jnp.float32)
 
-  for idx_t in range(0, T):
+  def body(idx_t, b_h):
     if USE_GK:
-      pass
+      b_gk = gk[idx_t, 0:BK].astype(jnp.float32)
+      b_h = b_h * jnp.exp(b_gk[:,None])
     if USE_GV:
-      pass
-    b_q = jnp.where(m_k, q[idx_t,0:BK], 0).astype(jnp.float32) * SCALE
-    b_k = jnp.where(m_k, k[idx_t,0:BK], 0).astype(jnp.float32)
-    b_v = jnp.where(m_v, v[idx_t,0:BV], 0).astype(jnp.float32)
+      b_gv = gv[idx_t, 0:BV].astype(jnp.float32)
+      b_h = b_h * jnp.exp(b_gv[None,:])
+    b_q = q[idx_t,0:BK].astype(jnp.float32) * SCALE
+    b_k = k[idx_t,0:BK].astype(jnp.float32)
+    b_v = v[idx_t,0:BV].astype(jnp.float32)
 
     b_h += b_k[:, None] * b_v[None, :]
     b_o = b_h * b_q[:,None]
     b_o = jnp.sum(b_o, axis=0)
-    o[1, 1, 1, :, idx_t] = jnp.where(m_h, b_o[:, None], 0).astype(o.dtype)
+    o[0, 0, 0, idx_t, 0:BV] = b_o.astype(o.dtype)
+    return b_h
+
+  b_h = jax.lax.fori_loop(0, T, body, b_h)
 
   if OUTPUT_FINAL_STATE:
-    ht = ht.at[:BK, :BV].set(b_h.astype(ht.dtype))
-
+    ht[0, 0, :, :] = b_h.astype(ht.dtype)
 
 def _fused_recurrent_gla_fwd_varlen(q: jax.Array,
     k: jax.Array,

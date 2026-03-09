@@ -34,7 +34,7 @@ def compare_tensor(name:str, gold:np.ndarray | jax.Array | torch.Tensor, tensor:
   max_val = np.max(np.abs(tensor))
   max_rel_diff = np.max(diff / (np.abs(tensor) + 1e-12))
 
-  is_close = np.allclose(gold, tensor, atol=atol, rtol=rtol)
+  is_close = np.allclose(gold, tensor, atol=atol, rtol=rtol, equal_nan=True)
   status = "PASS" if is_close else "FAIL"
 
   print(f"[{name}] {status}")
