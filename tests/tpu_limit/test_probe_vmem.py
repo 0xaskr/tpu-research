@@ -1,20 +1,11 @@
 import os
-
-os.environ["LIBTPU_INIT_ARGS"] = (
-  "--xla_mosaic_dump_to=./llo_ir/probe_vmem/pallas_ir/ "
-  "--xla_jf_dump_to=./llo_ir/probe_vmem/jax_ir"
-)
+import sys
 
 from src.jax.probe_vmem import probe_vmem_bytes
 
 
 def test_probe_vmem():
-  try:
-    vmem = probe_vmem_bytes()
-  except RuntimeError as e:
-    print(f"\n=== VMEM Probe Skipped ===")
-    print(f"No TPU available: {e}")
-    return
+  vmem = probe_vmem_bytes()
   vmem_mb = vmem / (1024 * 1024)
   print(f"\n=== VMEM Probe Results ===")
   print(f"Max allocatable VMEM: {vmem:,} bytes ({vmem_mb:.1f} MB)")
