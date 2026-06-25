@@ -17,6 +17,8 @@ dependencies = [
     "transformers",
     "einops",
     "flash-linear-attention",
+    "jupyter>=1.1.1",
+    "ipykernel>=7.3.0",
 ]
 
 [tool.uv]
