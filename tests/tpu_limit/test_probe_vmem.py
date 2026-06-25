@@ -1,4 +1,4 @@
-from src.jax.probe_vmem import probe_vmem_bytes
+from src.vmem_probe.probe_vmem import probe_vmem_bytes
 
 
 def test_probe_vmem():
