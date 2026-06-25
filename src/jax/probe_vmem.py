@@ -4,8 +4,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-
-_VMEM_CEIL = 512 * 1024 * 1024  # 512 MB, 远超任何已知 TPU
+from jax._src.pallas.mosaic.tpu_info import get_tpu_info
 
 
 def _ensure_tpu():
@@ -71,45 +70,30 @@ def _bisect(dtype, tolerance_bytes, vmem_limit_bytes=None):
   return lo
 
 
-def probe_vmem_physical_bytes(
-  dtype=jnp.float32,
-  tolerance_bytes: int = 1024 * 1024,
-) -> int:
-  """通过提升 scoped limit 后二分法探测硬件物理 VMEM 总量（字节）。
+def probe_vmem_physical_bytes() -> int:
+  """返回单个 TensorCore 的物理 VMEM 容量（字节）。
 
-  设置 --xla_tpu_scoped_vmem_limit_kib 和 CompilerParams.vmem_limit_bytes
-  将 scoped limit 提升到远超物理 VMEM 的值，使二分法直接命中硬件上限。
-
-  Args:
-    dtype: 测试分配使用的数据类型，默认 float32。
-    tolerance_bytes: 二分精度（字节），默认 1MB。
+  从 jax._src.pallas.mosaic.get_tpu_info() 直接读取，
+  不发起 XLA 编译。
 
   Returns:
-    物理 VMEM 字节数。
+    物理 VMEM 字节数（per TensorCore）。
 
   Raises:
     RuntimeError: 当前环境没有 TPU 设备。
   """
   _ensure_tpu()
-
-  existing = os.environ.get("LIBTPU_INIT_ARGS", "")
-  scoped_kib = _VMEM_CEIL // 1024
-  flag = f"--xla_tpu_scoped_vmem_limit_kib={scoped_kib}"
-  if flag not in existing:
-    os.environ["LIBTPU_INIT_ARGS"] = (
-      f"{existing} {flag}".strip()
-    )
-
-  return _bisect(dtype, tolerance_bytes, vmem_limit_bytes=_VMEM_CEIL)
+  return get_tpu_info().vmem_capacity_bytes
 
 
 def probe_vmem_scoped_bytes(
   dtype=jnp.float32,
   tolerance_bytes: int = 1024 * 1024,
 ) -> int:
-  """通过二分法探测单个 Pallas kernel 的 scoped VMEM limit（字节）。
+  """通过二分法探测单 kernel 的 scoped VMEM limit（字节）。
 
-  这是编译器默认允许单个 kernel 分配的最大 VMEM，通常小于物理总量。
+  这是编译器默认允许单个 kernel 分配的最大 VMEM，
+  XLA 侧没有提供 Python 回读接口，因此只能动态探测。
 
   Args:
     dtype: 测试分配使用的数据类型，默认 float32。
@@ -131,7 +115,7 @@ def probe_vmem_bytes(
 ) -> dict:
   """探测当前 TPU 的 VMEM 信息。
 
-  返回物理 VMEM 总量和单 kernel scoped limit 两个值。
+  物理 VMEM 从 get_tpu_info() 读取，scoped limit 通过二分探测。
 
   Args:
     dtype: 测试分配使用的数据类型，默认 float32。
@@ -139,21 +123,30 @@ def probe_vmem_bytes(
 
   Returns:
     dict with keys:
-      physical: 硬件物理 VMEM 总量（字节）
-      scoped_limit: 单 kernel scoped VMEM limit（字节）
-      device_kind: TPU 设备类型字符串
+      device_kind:     TPU 设备类型字符串
+      chip_version:    芯片版本 (v5e, v5p, v6e, ...)
+      generation:      代际（5, 6, 7, ...）
+      num_cores:       TensorCore 数量
+      physical:        单 core 物理 VMEM（字节）
+      total_physical:  芯片总物理 VMEM（bytes）= physical * num_cores
+      hbm_capacity:    HBM 容量（字节）
+      scoped_limit:    单 kernel scoped VMEM limit（字节）
 
   Raises:
     RuntimeError: 当前环境没有 TPU 设备。
   """
   _ensure_tpu()
 
+  info = get_tpu_info()
   device_kind = next(
     d.device_kind for d in jax.devices() if d.platform == "tpu"
   )
 
   return {
-    "physical": probe_vmem_physical_bytes(dtype, tolerance_bytes),
-    "scoped_limit": probe_vmem_scoped_bytes(dtype, tolerance_bytes),
     "device_kind": device_kind,
+    "chip_version": info.chip_version.value,
+    "generation": info.generation,
+    "num_cores": info.num_cores,
+    "physical": info.vmem_capacity_bytes,
+    "scoped_limit": _bisect(dtype, tolerance_bytes),
   }
